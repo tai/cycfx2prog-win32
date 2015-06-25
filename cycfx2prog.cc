@@ -48,18 +48,27 @@ static void *CheckMalloc(void *ptr)
 
 void USBDumpBusses(FILE *out)
 {
-	for(usb_bus *b=usb_busses; b; b=b->next)
-	{
-		for(struct usb_device *d=b->devices; d; d=d->next)
-		{
-			bool is_fx2_dev = (d->descriptor.idVendor==0x4b4 && 
-				d->descriptor.idProduct==0x8613);
-			fprintf(out,"Bus %s Device %s: ID %04x:%04x%s\n",
-				b->dirname,d->filename,
-				d->descriptor.idVendor,d->descriptor.idProduct,
-				is_fx2_dev ? " (unconfigured FX2)" : "");
-		}
-	}
+    int i, nr;
+    libusb_device **list;
+
+    nr = libusb_get_device_list(NULL, &list);
+
+    for (i = 0; i < nr; i++) {
+        struct libusb_device_descriptor desc;
+        libusb_device *ud = list[i];
+
+        if (libusb_get_device_descriptor(ud, &desc) != LIBUSB_SUCCESS)
+            continue;
+
+        uint8_t busnum = libusb_get_bus_number(ud);
+        uint8_t devnum = libusb_get_device_address(ud);
+        
+        bool is_fx2_dev = (desc.idVendor==0x4b4 && desc.idProduct==0x8613);
+        fprintf(out,"Bus %03d Device %03d: ID %04x:%04x%s\n",
+                busnum, devnum, desc.idVendor, desc.idProduct,
+                is_fx2_dev ? " (unconfigured FX2)" : "");
+    }
+    libusb_free_device_list(list, 1);
 }
 
 
@@ -102,7 +111,7 @@ static void HexDumpBuffer(FILE *out,const unsigned char *data,size_t size,
 		}
 #endif
 		
-		printf("  0x%04zx ",i);
+		printf("  0x%04x ",i);
 		size_t oldi=i;
 		for(j=0; j<32 && i<size; j++,i++)
 		{
@@ -209,20 +218,13 @@ int main(int argc,char **arg)
 	{  return(1);  }
 	
 	// Initialize the USB library...
-	usb_init();
-	
-	int rv=usb_find_busses();
-	if(rv<0)
-	{  fprintf(stderr,"usb_find_busses failed (rv=%d)\n",rv);  return(1);  }
-	rv=usb_find_devices();
-	if(rv<0)
-	{  fprintf(stderr,"usb_find_devices failed (rv=%d)\n",rv);  return(1);  }
+	libusb_init(NULL);
 	
 	if(do_list)
 	{  USBDumpBusses(stdout);  return(0);  }
 	
 	// Look for device. 
-	struct usb_device *usbdev=NULL;
+	libusb_device *usbdev=NULL;
 	if(arg_bus_dev)
 	{
 		char bus[16];
@@ -253,10 +255,16 @@ int main(int argc,char **arg)
 			return(1);
 		}
 	}
-	
-	fprintf(stderr,"Using ID %04x:%04x on %s.%s.\n",
-		usbdev->descriptor.idVendor,usbdev->descriptor.idProduct,
-		usbdev->bus->dirname,usbdev->filename);
+
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(usbdev, &desc) != LIBUSB_SUCCESS) {
+            return(1);
+        }
+        uint8_t busnum = libusb_get_bus_number(usbdev);
+        uint8_t devnum = libusb_get_device_address(usbdev);
+        
+	fprintf(stderr,"Using ID %04x:%04x on %03d.%03d.\n",
+		desc.idVendor, desc.idProduct, busnum, devnum);
 	
 	if(cycfx2.open(usbdev))
 	{  return(1);  }
@@ -422,7 +430,7 @@ int main(int argc,char **arg)
 			else
 			{
 				fprintf(stderr,"Sending %d bytes to EP adr 0x%02x\n",len,ep);
-				int rv=cycfx2.BlockWrite(ep,(const unsigned char*)str,len,type);
+				int rv=cycfx2.BlockWrite(ep,(unsigned char*)str,len,type);
 				errors += rv<0 ? 1 : 0;
 			}
 		}

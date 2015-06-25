@@ -15,18 +15,18 @@
 #ifndef _CYCFX2PROG_CYCFX2DEVICE_
 #define _CYCFX2PROG_CYCFX2DEVICE_ 1
 
-#include <usb.h>
+#include <libusb.h>
 
 
-extern struct usb_device *USBFindDevice(const char *bus,const char *dev);
-extern struct usb_device *USBFindDevice(int vendor,int product,int nth=0);
+extern libusb_device *USBFindDevice(const char *bus,const char *dev);
+extern libusb_device *USBFindDevice(int vendor,int product,int nth=0);
 
 
 class CypressFX2Device
 {
 	private:
-		struct usb_device *usbdev;
-		struct usb_dev_handle *usbhdl;
+                libusb_device *usbdev;
+		libusb_device_handle *usbhdl;
 		
 		// Force a certail "alt" interface; -1 for none.
 		int force_alt_interface;
@@ -49,7 +49,7 @@ class CypressFX2Device
 		
 		// Open usb device; will close previous one. 
 		// Returns 0 on success; 1 on error. Errors written to stderr. 
-		int open(struct usb_device *_usbdev);
+		int open(libusb_device *_usbdev);
 		
 		// Close device. Returns 0 on success. Errors written to stderr. 
 		int close();
@@ -79,7 +79,7 @@ class CypressFX2Device
 		int BlockRead(int endpoint,unsigned char *buf,size_t nbytes,
 			char type='b');
 		// Counterpart for BlockRead; type is 'b' or 'i' but not 'B'/'I'. 
-		int BlockWrite(int endpoint,const unsigned char *buf,size_t nbytes,
+		int BlockWrite(int endpoint,unsigned char *buf,size_t nbytes,
 			char type='b');
 		// Returns number of written bytes. See source comment!!
 		
@@ -97,7 +97,7 @@ class CypressFX2Device
 		// Send a USB control message. 
 		int CtrlMsg(unsigned char requesttype,
 			unsigned char request,int value,int index,
-			const unsigned char *ctl_buf=NULL,size_t ctl_buf_size=0);
+			unsigned char *ctl_buf=NULL,size_t ctl_buf_size=0);
 };
 
 #endif  /* _CYCFX2PROG_CYCFX2DEVICE_ */

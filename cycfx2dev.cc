@@ -23,35 +23,63 @@
 #include "cycfx2dev.h"
 
 
-struct usb_device *USBFindDevice(const char *bus,const char *dev)
+libusb_device *USBFindDevice(const char *bus,const char *dev)
 {
-	for(usb_bus *b=usb_busses; b; b=b->next)
-	{
-		if(strcmp(b->dirname,bus))  continue;
-		for(struct usb_device *d=b->devices; d; d=d->next)
-		{
-			if(strcmp(d->filename,dev))  continue;
-			return(d);
-		}
-	}
-	return(NULL);
+    int i, nr;
+    libusb_device **list;
+    libusb_device *found = NULL;
+
+    uint8_t arg_bus = atoi(bus);
+    uint8_t arg_dev = atoi(dev);
+
+    nr = libusb_get_device_list(NULL, &list);
+
+    for (i = 0; i < nr; i++) {
+        libusb_device *ud = list[i];
+
+        uint8_t busnum = libusb_get_bus_number(ud);
+        uint8_t devnum = libusb_get_device_address(ud);
+
+        if (busnum == arg_bus && devnum == arg_dev) {
+            found = ud;
+            break;
+        }
+    }
+
+    if (found) {
+        libusb_ref_device(found);
+    }
+    libusb_free_device_list(list, 1);
+
+    return(found);
 }
 
-struct usb_device *USBFindDevice(int vendor,int product,int nth)
+libusb_device *USBFindDevice(int vendor,int product,int nth)
 {
-	for(usb_bus *b=usb_busses; b; b=b->next)
-	{
-		for(struct usb_device *d=b->devices; d; d=d->next)
-		{
-			if(d->descriptor.idVendor==vendor && 
-				d->descriptor.idProduct==product)
-			{
-				if(!nth--)
-				{  return(d);  }
-			}
-		}
-	}
-	return(NULL);
+    int i, nr;
+    libusb_device **list;
+    libusb_device *found = NULL;
+
+    nr = libusb_get_device_list(NULL, &list);
+
+    for (i = 0; i < nr; i++) {
+        struct libusb_device_descriptor desc;
+        libusb_device *ud = list[i];
+
+        if (libusb_get_device_descriptor(ud, &desc) != LIBUSB_SUCCESS)
+            continue;
+        
+        if (vendor == desc.idVendor && product == desc.idProduct && nth-- == 0) {
+            found = ud;
+        }
+    }
+
+    if (found) {
+        libusb_ref_device(found);
+    }
+    libusb_free_device_list(list, 1);
+
+    return(found);
 }
 
 //------------------------------------------------------------------------------
@@ -79,19 +107,20 @@ int CypressFX2Device::BlockRead(int endpoint,unsigned char *buf,size_t nbytes,
 	
 	int interface=0;
 	int alt_interface=(type=='i' ? 2 : 1);
+        int rc;
 	if(force_alt_interface>=0)  alt_interface=force_alt_interface;
-	if(usb_claim_interface(usbhdl,interface)<0)
+	if((rc = libusb_claim_interface(usbhdl,interface)) != LIBUSB_SUCCESS)
 	{  fprintf(stderr,"Failed to claim interface %d: %s\n",
-		interface,usb_strerror());  return(-1);  }
+                   interface,libusb_strerror((libusb_error)rc));  return(-1);  }
 	
 	size_t chunk_size=nbytes;
 	int error=0;
 	size_t left=nbytes;
 	do {
-		if(usb_set_altinterface(usbhdl,alt_interface)<0)
+            if((rc = libusb_set_interface_alt_setting(usbhdl,interface,alt_interface)) != LIBUSB_SUCCESS)
 		{
 			fprintf(stderr,"Failed to set altinterface %d: %s\n",
-				alt_interface,usb_strerror());
+				alt_interface,libusb_strerror((libusb_error)rc));
 			++error;  break;
 		}
 		
@@ -101,17 +130,17 @@ int CypressFX2Device::BlockRead(int endpoint,unsigned char *buf,size_t nbytes,
 			size_t bs = left>chunk_size ? chunk_size : left;
 			ssize_t rv;
 			if(type=='i')
-			{  rv=usb_interrupt_read(usbhdl,endpoint,(char*)buf,bs,
+			{  rc=libusb_interrupt_transfer(usbhdl,endpoint,buf,bs, &rv,
 				/*timeout=*/1000/*msec*/);  }
 			else
-			{  rv=usb_bulk_read(usbhdl,endpoint,(char*)buf,bs,
+			{  rc=libusb_bulk_transfer(usbhdl,endpoint,buf,bs,&rv,
 				/*timeout=*/1000/*msec*/);  }
 			++ncalls;
-			if(rv<0)
+			if(rc!=LIBUSB_SUCCESS)
 			{
-				fprintf(stderr,"Reading %zu bytes from EP 0x%02x: "
-					"USB: %s SYS: %s\n",
-					bs,endpoint,usb_strerror(),strerror(-rv));
+				fprintf(stderr,"Reading %u bytes from EP 0x%02x: "
+					"USB: %s\n",
+					bs,endpoint,libusb_strerror((libusb_error)rc));
 				++error;
 				goto breakout;
 			}
@@ -123,7 +152,7 @@ int CypressFX2Device::BlockRead(int endpoint,unsigned char *buf,size_t nbytes,
 				
 				// Not sure if rv=0 is a valid timeout indication...
 				//if(!rv)
-					fprintf(stderr,"Short read (%zd/%zu bytes)%s\n",rv,bs,
+					fprintf(stderr,"Short read (%d/%u bytes)%s\n",rv,bs,
 						rv==0 ? " (timeout?)" : "");
 				if(rv==0)
 				{  ++error;  goto breakout;  }
@@ -131,14 +160,14 @@ int CypressFX2Device::BlockRead(int endpoint,unsigned char *buf,size_t nbytes,
 		}
 	} while(0); breakout:;
 	
-	usb_release_interface(usbhdl,interface);
+	libusb_release_interface(usbhdl,interface);
 	
 	size_t read=nbytes-left;
 	return(read ? read : (error ? -1 : 0));
 }
 
 
-int CypressFX2Device::BlockWrite(int endpoint,const unsigned char *buf,
+int CypressFX2Device::BlockWrite(int endpoint, unsigned char *buf,
 	size_t nbytes,char type)
 {
 	// FIXME: This function is somewhat bugged concerning reliable delivery 
@@ -155,22 +184,23 @@ int CypressFX2Device::BlockWrite(int endpoint,const unsigned char *buf,
 		case 'i':  break;
 		default:  assert(0);
 	}
-	
+
+	int rc;
 	int interface=0;
 	int alt_interface=(type=='i' ? 2 : 1);
 	if(force_alt_interface>=0)  alt_interface=force_alt_interface;
-	if(usb_claim_interface(usbhdl,interface)<0)
+	if((rc = libusb_claim_interface(usbhdl,interface)) != LIBUSB_SUCCESS)
 	{  fprintf(stderr,"Failed to claim interface %d: %s\n",
-		interface,usb_strerror());  return(-1);  }
+                   interface,libusb_strerror((libusb_error)rc));  return(-1);  }
 	
 	size_t chunk_size=nbytes;
 	int error=0;
 	size_t left=nbytes;
 	do {
-		if(usb_set_altinterface(usbhdl,alt_interface)<0)
+		if((rc=libusb_set_interface_alt_setting(usbhdl,interface,alt_interface))!=LIBUSB_SUCCESS)
 		{
 			fprintf(stderr,"Failed to set altinterface %d: %s\n",
-				alt_interface,usb_strerror());
+				alt_interface,libusb_strerror((libusb_error)rc));
 			++error;  break;
 		}
 		
@@ -180,17 +210,17 @@ int CypressFX2Device::BlockWrite(int endpoint,const unsigned char *buf,
 			size_t bs = left>chunk_size ? chunk_size : left;
 			ssize_t rv;
 			if(type=='i')
-			{  rv=usb_interrupt_write(usbhdl,endpoint,(char*)buf,bs,
+			{  rc=libusb_interrupt_transfer(usbhdl,endpoint,buf,bs,&rv,
 				/*timeout=*/1000/*msec*/);  }
 			else
-			{  rv=usb_bulk_write(usbhdl,endpoint,(char*)buf,bs,
+			{  rc=libusb_bulk_transfer(usbhdl,endpoint,buf,bs,&rv,
 				/*timeout=*/1000/*msec*/);  }
 			++ncalls;
-			if(rv<0)
+			if(rc!=LIBUSB_SUCCESS)
 			{
-				fprintf(stderr,"Writing %zu bytes to EP 0x%02x: "
-					"USB: %s SYS: %s\n",
-					bs,endpoint,usb_strerror(),strerror(-rv));
+				fprintf(stderr,"Writing %u bytes to EP 0x%02x: "
+					"USB: %s\n",
+					bs,endpoint,libusb_strerror((libusb_error)rc));
 				++error;
 				goto breakout;
 			}
@@ -200,7 +230,7 @@ int CypressFX2Device::BlockWrite(int endpoint,const unsigned char *buf,
 			{
 				// Not sure if rv=0 is a valid timeout indication...
 				//if(!rv)
-					fprintf(stderr,"Short write (%zd/%zu bytes)%s\n",rv,bs,
+					fprintf(stderr,"Short write (%d/%u bytes)%s\n",rv,bs,
 						rv==0 ? " (timeout?)" : "");
 				if(rv==0)
 				{  ++error;  goto breakout;  }
@@ -208,7 +238,7 @@ int CypressFX2Device::BlockWrite(int endpoint,const unsigned char *buf,
 		}
 	} while(0); breakout:;
 	
-	usb_release_interface(usbhdl,interface);
+	libusb_release_interface(usbhdl,interface);
 	
 	size_t read=nbytes-left;
 	return(read ? read : (error ? -1 : 0));
@@ -222,22 +252,23 @@ int CypressFX2Device::BenchBlockRead(int endpoint,size_t nbytes,
 	{  fprintf(stderr,"BenchBlockRead: Not connected!\n");  return(1);  }
 	
 	assert(type=='b' || type=='i');
-	
+
+        int rc;
 	int interface=0;
 	int alt_interface=(type=='i' ? 2 : 1);
 	if(force_alt_interface>=0)  alt_interface=force_alt_interface;
-	if(usb_claim_interface(usbhdl,interface)<0)
+	if((rc=libusb_claim_interface(usbhdl,interface))!=LIBUSB_SUCCESS)
 	{  fprintf(stderr,"Failed to claim interface %d: %s\n",
-		interface,usb_strerror());  return(1);  }
+                   interface,libusb_strerror((libusb_error)rc));  return(1);  }
 	
 	int error=0;
-	char *buf=(char*)malloc(chunk_size);
+	unsigned char *buf=(unsigned char*)malloc(chunk_size);
 	assert(buf);
 	do {
-		if(usb_set_altinterface(usbhdl,alt_interface)<0)
+            	if((rc=libusb_set_interface_alt_setting(usbhdl,interface,alt_interface))!=LIBUSB_SUCCESS)
 		{
 			fprintf(stderr,"Failed to set altinterface %d: %s\n",
-				alt_interface,usb_strerror());
+				alt_interface,libusb_strerror((libusb_error)rc));
 			++error;  break;
 		}
 		
@@ -252,17 +283,17 @@ int CypressFX2Device::BenchBlockRead(int endpoint,size_t nbytes,
 			size_t bs = left>chunk_size ? chunk_size : left;
 			ssize_t rv;
 			if(type=='i')
-			{  rv=usb_interrupt_read(usbhdl,endpoint,buf,bs,
+			{  rc=libusb_interrupt_transfer(usbhdl,endpoint,buf,bs,&rv,
 				/*timeout=*/1000/*msec*/);  }
 			else
-			{  rv=usb_bulk_read(usbhdl,endpoint,buf,bs,
+			{  rc=libusb_bulk_transfer(usbhdl,endpoint,buf,bs,&rv,
 				/*timeout=*/1000/*msec*/);  }
 			++ncalls;
-			if(rv<0)
+			if(rc!=LIBUSB_SUCCESS)
 			{
-				fprintf(stderr,"Reading %zu bytes from EP 0x%02x: "
-					"USB: %s SYS: %s\n",
-					bs,endpoint,usb_strerror(),strerror(-rv));
+				fprintf(stderr,"Reading %u bytes from EP 0x%02x: "
+					"USB: %s\n",
+					bs,endpoint,libusb_strerror((libusb_error)rc));
 				++error;
 				goto breakout;
 			}
@@ -270,7 +301,7 @@ int CypressFX2Device::BenchBlockRead(int endpoint,size_t nbytes,
 			{
 				// Not sure if rv=0 is a valid timeout indication...
 				//if(!rv)
-					fprintf(stderr,"Short read (%zd/%zu bytes)%s\n",rv,bs,
+					fprintf(stderr,"Short read (%d/%u bytes)%s\n",rv,bs,
 						rv==0 ? " (timeout?)" : "");
 				if(rv==0)
 				{  ++error;  goto breakout;  }
@@ -285,8 +316,8 @@ int CypressFX2Device::BenchBlockRead(int endpoint,size_t nbytes,
 		double seconds = 
 			double(end_tv.tv_sec-start_tv.tv_sec)+
 			double(end_tv.tv_usec-start_tv.tv_usec)/1000000.0;
-		printf("Read %zu bytes in %5d msec (chunk size %6zu): "
-			"%6.3f Mb/sec (%5d calls, %6zu bytes/call)\n",
+		printf("Read %u bytes in %5d msec (chunk size %6u): "
+			"%6.3f Mb/sec (%5d calls, %6u bytes/call)\n",
 			nbytes,(int)(seconds*1000+0.5),
 			chunk_size,nbytes/seconds/1024/1024,
 			ncalls,nbytes/ncalls);
@@ -295,7 +326,7 @@ int CypressFX2Device::BenchBlockRead(int endpoint,size_t nbytes,
 	
 	if(buf)
 	{  free(buf);  buf=NULL;  }
-	usb_release_interface(usbhdl,interface);
+	libusb_release_interface(usbhdl,interface);
 	
 	return(error ? -1 : 0);
 }
@@ -317,24 +348,24 @@ int CypressFX2Device::WriteRAM(size_t addr,const unsigned char *data,
 {
 	if(!IsOpen())
 	{  fprintf(stderr,"WriteRAM: Not connected!\n");  return(1);  }
-	
+
 	int n_errors=0;
 	
 	const size_t chunk_size=16;
-	const unsigned char *d=data;
-	const unsigned char *dend=data+nbytes;
+	unsigned char *d=(unsigned char *)data;
+	unsigned char *dend=d+nbytes;
 	while(d<dend)
 	{
 		size_t bs=dend-d;
 		if(bs>chunk_size)  bs=chunk_size;
 		size_t dl_addr=addr+(d-data);
-		int rv=usb_control_msg(usbhdl,0x40,0xa0,
+		int rv=libusb_control_transfer(usbhdl,0x40,0xa0,
 			/*addr=*/dl_addr,0,
-			/*buf=*/(char*)d,/*size=*/bs,
+			/*buf=*/d,/*size=*/bs,
 			/*timeout=*/1000/*msec*/);
 		if(rv<0)
-		{  fprintf(stderr,"Writing %zu bytes at 0x%zx: %s\n",
-			bs,dl_addr,usb_strerror());  ++n_errors;  }
+		{  fprintf(stderr,"Writing %u bytes at 0x%x: %s\n",
+                           bs,dl_addr,libusb_strerror((libusb_error)rv));  ++n_errors;  }
 		d+=bs;
 	}
 	
@@ -358,13 +389,13 @@ int CypressFX2Device::ReadRAM(size_t addr,unsigned char *data,size_t nbytes)
 		size_t bs=dend-d;
 		if(bs>chunk_size)  bs=chunk_size;
 		size_t rd_addr=addr+(d-data);
-		int rv=usb_control_msg(usbhdl,0xc0,0xa0,
+		int rv=libusb_control_transfer(usbhdl,0xc0,0xa0,
 			/*addr=*/rd_addr,0,
-			/*buf=*/(char*)d,/*size=*/bs,
+			/*buf=*/d,/*size=*/bs,
 			/*timeout=*/1000/*msec*/);
 		if(rv<0)
-		{  fprintf(stderr,"Reading %zu bytes at 0x%zx: %s\n",
-			bs,rd_addr,usb_strerror());  ++n_errors;  }
+		{  fprintf(stderr,"Reading %u bytes at 0x%x: %s\n",
+                           bs,rd_addr,libusb_strerror((libusb_error)rv));  ++n_errors;  }
 		d+=bs;
 	}
 	
@@ -390,7 +421,7 @@ int CypressFX2Device::_ProgramIHexLine(const char *buf,
 	if(type==0)
 	{
 		//printf("  Writing nbytes=%d at addr=0x%04x\n",nbytes,addr);
-		assert(nbytes>=0 && nbytes<256);
+		assert(nbytes<256);
 		unsigned char data[nbytes];
 		unsigned char cksum=nbytes+addr+(addr>>8)+type;
 		for(unsigned int i=0; i<nbytes; i++)
@@ -523,32 +554,33 @@ int CypressFX2Device::ProgramBinFile(const char *path,size_t start_addr)
 
 int CypressFX2Device::CtrlMsg(unsigned char requesttype,
 	unsigned char request,int value,int index,
-	const unsigned char *ctl_buf,size_t ctl_buf_size)
+	unsigned char *ctl_buf,size_t ctl_buf_size)
 {
 	if(!IsOpen())
 	{  fprintf(stderr,"CtrlMsg: Not connected!\n");  return(1);  }
 	
 	int n_errors=0;
 	
-	int rv=usb_control_msg(usbhdl,requesttype,request,
+	int rv=libusb_control_transfer(usbhdl,requesttype,request,
 		value,index,
-		(char*)ctl_buf,ctl_buf_size,
+		ctl_buf,ctl_buf_size,
 		/*timeout=*/1000/*msec*/);
 	if(rv<0)
 	{  fprintf(stderr,"Sending USB control message: %s\n",
-		usb_strerror());  ++n_errors;  }
+                   libusb_strerror((libusb_error)rv));  ++n_errors;  }
 	
 	return(n_errors);
 }
 
 
-int CypressFX2Device::open(struct usb_device *_usbdev)
+int CypressFX2Device::open(libusb_device *_usbdev)
 {
+	int rc;
 	close();
 	usbdev=_usbdev;
-	usbhdl=usb_open(usbdev);
-	if(!usbhdl)
-	{  fprintf(stderr,"Failed to open device: %s\n",usb_strerror());
+	rc=libusb_open(usbdev,&usbhdl);
+	if(rc!=0)
+	{  fprintf(stderr,"Failed to open device: %s\n",libusb_strerror((libusb_error)rc));
 		return(1);  }
 	return(0);
 }
@@ -556,14 +588,11 @@ int CypressFX2Device::open(struct usb_device *_usbdev)
 
 int CypressFX2Device::close()
 {
-	int rv=0;
 	if(usbhdl)
 	{
-		rv=usb_close(usbhdl);  usbhdl=NULL;
-		if(rv)
-		{  fprintf(stderr,"closing USB device: %s\n",usb_strerror());  }
+		libusb_close(usbhdl);  usbhdl=NULL;
 	}
 	usbdev=NULL;
-	return(rv);
+	return(0);
 }
 

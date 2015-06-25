@@ -1,18 +1,20 @@
+LIBUSB = /c/src/libusb
+
 CC = gcc -pipe
 VERSION = 0.47
 CFLAGS = -O2 -fno-rtti -fno-exceptions -DCYCFX2PROG_VERSION=\"$(VERSION)\" \
-	-W -Wall -Wformat
-LDFLAGS = -lusb
+	-W -Wall -Wformat -I$(LIBUSB)/libusb
+LDFLAGS = -L$(LIBUSB)/libusb/.libs -lusb-1.0
 DIST_DEST = cycfx2prog-$(VERSION)
 
-all: cycfx2prog
+all: cycfx2prog.exe
 
 # NOTE: Also add sources to the "dist:" target!
-cycfx2prog: cycfx2prog.o cycfx2dev.o
-	$(CC) $(LDFLAGS) cycfx2prog.o cycfx2dev.o -o cycfx2prog
+cycfx2prog.exe: cycfx2prog.o cycfx2dev.o
+	$(CC) -o $@ $^ $(LDFLAGS)
 
 clean:
-	-rm -f *.o
+	-rm -f *.o *.exe
 
 distclean: clean
 	-rm -f cycfx2prog
